@@ -30,9 +30,9 @@ function gpm_umount {
 
 alias gpm='bindutil gpm'
 
-function gpm_hashicorp {
-   product=$1
+function _gpm_aliasable {
+   package=$1
    mdir=$2
    shift 2
-   gpm "$mdir" "github.com/hashicorp/${product}" "$@"
+   gpm "$mdir" "$package" "$@"
 }
