@@ -10,7 +10,7 @@ MacOS has no builtin bind mounting capabilities so a FUSE + bindfs must be used 
 * Fuse for MacOS: https://osxfuse.github.io/
 * bindfs: https://bindfs.org/
 
-Linux can alsu use the bindfs FUSE filesystem. Most likely these packages are available for your distro already and installation should be straight forward.
+Linux can also use the bindfs FUSE filesystem. Most likely these packages are available for your distro already and installation should be straight forward.
 
 ### `mount`
 
