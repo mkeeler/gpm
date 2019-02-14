@@ -14,7 +14,7 @@ Linux can also use the bindfs FUSE filesystem. Most likely these packages are av
 
 ### `mount`
 
-On Linux the mount command can be used to perform the bind mounting. This however may require root privileges in order to execute `mount`
+On Linux the mount command can be used to perform the bind mounting. This however may require root privileges in order to execute `mount`so FUSE should be preferred.
 
 ## Usage (from bash)
 
