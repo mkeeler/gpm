@@ -4,6 +4,7 @@ import contextlib
 import os
 import sys
 import shutil
+import tempfile
 import threading
 import signal
 import time
@@ -29,7 +30,7 @@ def which(program):
 def bindmount(src, dest):
    bindfs = which('bindfs')
    mount = which('mount')
-   
+
    if sys.platform == 'darwin' and bindfs is not None:
       subprocess.check_call([bindfs, '-o', 'local,extended_security', src, dest])
       return False
@@ -41,45 +42,54 @@ def bindmount(src, dest):
       return False
    else:
       raise Exception('Unsupported Platform: darwin/bindfs, linux/bindfs or linux/mount -o bind')
-   
+
 def unbindmount(dest, fusermount_umount):
    fusermount = which('fusermount')
    umount = which('umount')
-   
-   if fusermount is not None:
-      subprocess.check_call([fusermount, '-u', dest])
-   elif umount is not None:
-      subprocess.check_call([umount, dest])
-   else:
-      raise Exception("Failed to unmount")
+
+   for i in range(5):
+      try:
+         if fusermount is not None:
+            subprocess.check_output([fusermount, '-u', dest], stderr=subprocess.STDOUT)
+         elif umount is not None:
+            subprocess.check_output([umount, dest], stderr=subprocess.STDOUT)
+         else:
+            raise Exception("Failed to unmount")
+      except subprocess.CalledProcessError as e:
+         if "Resource busy" not in e.output:
+            raise
+      else:
+         break
+
+      time.sleep(1)
 
 @contextlib.contextmanager
 def bindmount_ctx(src, dest):
    fusermount_umount = bindmount(src, dest)
    yield
    unbindmount(dest, fusermount_umount)
-  
-def exec_with_bindmount(src, dest, command, working_dir):
+
+def exec_with_bindmount(src, dest, command, working_dir, env):
    done = threading.Event()
    def handler(signum, frame):
-      done.set()   
+      done.set()
    signal.signal(signal.SIGINT, handler)
-   
+
    with bindmount_ctx(src, dest):
-      proc = subprocess.Popen(command, shell=False, cwd=working_dir)
-      
+      proc = subprocess.Popen(command, shell=False, cwd=working_dir, env=env)
+
       while not done.is_set():
          if proc.poll() is not None:
             return proc.returncode
          time.sleep(1)
-          
+
       if proc.poll() is not None:
-         proc.terminate() 
+         proc.terminate()
       return 0
-   
+
 if __name__ == '__main__':
    import argparse
-      
+
    def do_mount(args):
       try:
          if args.manage_dir:
@@ -90,7 +100,7 @@ if __name__ == '__main__':
          sys.exit(1)
       else:
          sys.exit(0)
-      
+
    def do_umount(args):
       try:
          unbindmount(args.path)
@@ -101,7 +111,7 @@ if __name__ == '__main__':
          sys.exit(1)
       else:
          sys.exit(0)
-   
+
    @contextlib.contextmanager
    def dir_manage_ctx(manage, path) :
       if manage:
@@ -109,14 +119,20 @@ if __name__ == '__main__':
       yield
       if manage:
          shutil.rmtree(path)
-      
+
+   @contextlib.contextmanager
+   def tempdir_ctx(prefix):
+      path = tempfile.mkdtemp(prefix=prefix)
+      yield path
+      shutil.rmtree(path)
+
    def do_exec(args):
       try:
          with dir_manage_ctx(args.manage_dir, args.destination):
             command = []
             command.append(which(args.command))
             command.extend(args.args)
-            ret = exec_with_bindmount(args.source, args.destination, command, args.wdir)
+            ret = exec_with_bindmount(args.source, args.destination, command, args.wdir, None)
       except subprocess.CalledProcessError as e:
          sys.stderr.write('Failed bind mount: {0}'.format(e))
          sys.exit(1)
@@ -127,23 +143,48 @@ if __name__ == '__main__':
          sys.exit(2)
       else:
          sys.exit(ret)
-         
+
       sys.exit(0)
-   
+
+
+   def do_gpm(args):
+      try:
+         with tempdir_ctx(os.path.basename(args.source)) as tempdir:
+            src_path = os.path.join(tempdir, "src", args.package)
+            os.makedirs(src_path)
+            go_path = ':'.join([tempdir,os.environ["GOPATH"]])
+            os.environ['GOPATH'] = go_path
+            command = []
+            command.append(which(args.command))
+            command.extend(args.args)
+            ret = exec_with_bindmount(args.source, src_path, command, src_path, os.environ)
+      except subprocess.CalledProcessError as e:
+         sys.stderr.write('Failed bind mount: {0}'.format(e))
+         sys.exit(1)
+      except Exception as e:
+         sys.stderr.write('Failed to execute command: {0}'.format(e))
+         sys.exit(1)
+      except KeyboardInterrupt:
+         sys.exit(2)
+      else:
+         sys.exit(ret)
+
+      sys.exit(0)
+
    parser = argparse.ArgumentParser()
    subs = parser.add_subparsers()
-   
+
    mount_cmd = subs.add_parser('mount')
    mount_cmd.add_argument('-c', '--create-dir', dest='manage_dir', action='store_true', default=False, help='Create the destination directory if it does not exist')
    mount_cmd.add_argument('source', type=abspath, help='Source path to bind mount')
    mount_cmd.add_argument('destination', type=abspath, help='Destination where to bind mount to')
    mount_cmd.set_defaults(func=do_mount)
-   
+
    umount_cmd = subs.add_parser('umount')
    umount_cmd.add_argument('-r', '--remove-dir', dest='manage_dir', action='store_true', default=False, help='Remove the mountpoint')
    umount_cmd.add_argument('path', type=abspath, help='Bind mounted directory to unmount')
    umount_cmd.set_defaults(func=do_umount)
-   
+
    exec_cmd = subs.add_parser('exec')
    exec_cmd.add_argument('-m', '--manage-dir', dest='manage_dir', action='store_true', default=False, help='Create/Remove the destination directory')
    exec_cmd.add_argument('-d', '--working-directory', dest='wdir', default=None, help='Change to this directory before executing')
@@ -152,7 +193,14 @@ if __name__ == '__main__':
    exec_cmd.add_argument('command', help='The command to execute')
    exec_cmd.add_argument('args', nargs=argparse.REMAINDER, help='Arguments to pass the command')
    exec_cmd.set_defaults(func=do_exec)
-   
+
+   gpm_cmd = subs.add_parser('gpm')
+   gpm_cmd.add_argument('source', type=abspath, help='Source path to bind mount')
+   gpm_cmd.add_argument('package', type=str, help='Go Package Path')
+   gpm_cmd.add_argument('command', help='The command to execute')
+   gpm_cmd.add_argument('args', nargs=argparse.REMAINDER, help='Arguments to pass the command')
+   gpm_cmd.set_defaults(func=do_gpm)
+
    args = parser.parse_args()
-   
+
    args.func(args)

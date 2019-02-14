@@ -28,17 +28,11 @@ function gpm_umount {
    bindutil umount ${GOPATH}/src/${2}
 }
 
-function gpm {
-   src=$1
-   dest=$2
-   mkdir -p ${GOPATH}/src/${dest}
-   shift 2
-   bindutil exec $src ${GOPATH}/src/${dest} "$@"
-}
+alias gpm='bindutil gpm'
 
-function _gpm_aliasable {
-   package=$1
+function gpm_hashicorp {
+   product=$1
    mdir=$2
    shift 2
-   gpm $mdir $package -d "${GOPATH}/src/${package}" "$@"
+   gpm "$mdir" "github.com/hashicorp/${product}" "$@"
 }
