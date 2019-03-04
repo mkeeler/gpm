@@ -11,6 +11,10 @@ import time
 
 abspath = lambda x: os.path.abspath(os.path.expandvars(os.path.expanduser(x)))
 
+class UnmountFailed(Exception):
+   def __init__(self, msg):
+      self.message = msg
+
 def which(program):
    def is_exe(fpath):
       return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
@@ -47,6 +51,7 @@ def unbindmount(dest, fusermount_umount):
    fusermount = which('fusermount')
    umount = which('umount')
 
+   last_exc = None
    for i in range(5):
       try:
          if fusermount is not None:
@@ -56,12 +61,18 @@ def unbindmount(dest, fusermount_umount):
          else:
             raise Exception("Failed to unmount")
       except subprocess.CalledProcessError as e:
+         last_exc = UnmountFailed(e.output)
          if "Resource busy" not in e.output:
-            raise
+            raise last_exc
+      except Exception as e:
+         raise UnmountFailed(str(e))
       else:
-         break
+         # return early when successfully unmounted
+         return
 
       time.sleep(1)
+
+   raise last_exc
 
 @contextlib.contextmanager
 def bindmount_ctx(src, dest):
@@ -86,6 +97,38 @@ def exec_with_bindmount(src, dest, command, working_dir, env):
       if proc.poll() is not None:
          proc.terminate()
       return 0
+
+class TempDirCtx(object):
+   def __init__(self, prefix):
+      self._prefix = prefix
+
+   def __enter__(self):
+      self._path = tempfile.mkdtemp(prefix=self._prefix)
+      return self._path
+
+   def __exit__(self, type, value, traceback):
+      if type is None or type is not UnmountFailed:
+         shutil.rmtree(self._path)
+
+      return False
+
+
+class DirManageCtx(object):
+   def __init__(self, directory=None, managed=False):
+      self._directory = directory
+      self._managed = managed
+
+   def __enter__(self):
+      if self._managed:
+         os.makedirs(self._directory)
+
+      return self._directory
+
+   def __exit__(self, type, value, traceback):
+      if (type is None or type is not UnmountFailed)  and self._managed:
+        shutil.rmtree(self._directory)
+
+      return False
 
 if __name__ == '__main__':
    import argparse
@@ -112,23 +155,10 @@ if __name__ == '__main__':
       else:
          sys.exit(0)
 
-   @contextlib.contextmanager
-   def dir_manage_ctx(manage, path) :
-      if manage:
-         os.makedirs(path)
-      yield
-      if manage:
-         shutil.rmtree(path)
-
-   @contextlib.contextmanager
-   def tempdir_ctx(prefix):
-      path = tempfile.mkdtemp(prefix=prefix)
-      yield path
-      shutil.rmtree(path)
 
    def do_exec(args):
       try:
-         with dir_manage_ctx(args.manage_dir, args.destination):
+         with DirManagedCtx(args.manage_dir, args.destination):
             command = []
             command.append(which(args.command))
             command.extend(args.args)
@@ -136,8 +166,11 @@ if __name__ == '__main__':
       except subprocess.CalledProcessError as e:
          sys.stderr.write('Failed bind mount: {0}'.format(e))
          sys.exit(1)
+      except UnmountFailed as e:
+         sys.stderr.write('Failed to unmount: {0}'.format(e.message))
+         sys.exit(1)
       except Exception as e:
-         sys.stderr.write('Failed to execute command: {0}'.format(e))
+         sys.stderr.write('Failed to execute command: {0}\n'.format(e))
          sys.exit(1)
       except KeyboardInterrupt:
          sys.exit(2)
@@ -149,20 +182,27 @@ if __name__ == '__main__':
 
    def do_gpm(args):
       try:
-         with tempdir_ctx(os.path.basename(args.source)) as tempdir:
+         with TempDirCtx(os.path.basename(args.source)) as tempdir:
             src_path = os.path.join(tempdir, "src", args.package)
+            bin_dir = os.path.join(tempdir, "bin")
             os.makedirs(src_path)
-            go_path = ':'.join([tempdir,os.environ["GOPATH"]])
+            os.makedirs(bin_dir)
+            go_path = tempdir
+            if not args.clean_gopath:
+               go_path = ':'.join([tempdir,os.environ["GOPATH"]])
             os.environ['GOPATH'] = go_path
             command = []
             command.append(which(args.command))
             command.extend(args.args)
             ret = exec_with_bindmount(args.source, src_path, command, src_path, os.environ)
       except subprocess.CalledProcessError as e:
-         sys.stderr.write('Failed bind mount: {0}'.format(e))
+         sys.stderr.write('Failed bind mount: {0}\n'.format(e))
+         sys.exit(1)
+      except UnmountFailed as e:
+         sys.stderr.write('Failed to unmount: {0}\n'.format(e.message))
          sys.exit(1)
       except Exception as e:
-         sys.stderr.write('Failed to execute command: {0}'.format(e))
+         sys.stderr.write('Failed to execute command: {0}\n'.format(e))
          sys.exit(1)
       except KeyboardInterrupt:
          sys.exit(2)
@@ -195,6 +235,7 @@ if __name__ == '__main__':
    exec_cmd.set_defaults(func=do_exec)
 
    gpm_cmd = subs.add_parser('gpm')
+   gpm_cmd.add_argument('--clean-gopath', dest='clean_gopath', action='store_true', default=False, help='Only use the temporary GOPATH instead of prepending path entries')
    gpm_cmd.add_argument('source', type=abspath, help='Source path to bind mount')
    gpm_cmd.add_argument('package', type=str, help='Go Package Path')
    gpm_cmd.add_argument('command', help='The command to execute')
