@@ -37,7 +37,7 @@ bindutil.py gpm . github.com/hashicorp/consul make
 
 ## Internals
 
-The `binduitl.py gpm` subcommand will do a few things:
+The `bindutil.py gpm` subcommand will do a few things:
 
 1. Create a temporary directory to store a per-command GOPATH. 
 2. Bind mount the desired directory into the per-command GOPATH at `<per-command GOPATH>/src/<package>`
